@@ -97,7 +97,7 @@ Ensure `vercel.json` points `api/index.py` to `@vercel/python`. Set environment 
 
 ## Submodule Note
 
-This repository is a **Git submodule** of [revvup-app](https://github.com/tharakawijayathilaka/revvup-app).
+This repository is a **Git submodule** of [main-application](https://github.com/ChamathDilshanC/main-application).
 
 ## Security (Production)
 
