@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.core.config import get_settings
+from app.core.exceptions import not_found
 from app.core.security import require_active_owner
 from app.core.supabase_client import get_supabase
 from app.models.bike import BikeCreate, BikeDetail, BikeSummary, BikeUpdate
@@ -11,6 +12,13 @@ router = APIRouter(prefix="/bikes", tags=["bikes"])
 
 TABLE = "bikes"
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+def _ensure_bike_uuid(bike_id: str) -> None:
+    try:
+        uuid.UUID(bike_id)
+    except ValueError:
+        raise not_found("Bike not found")
 
 
 @router.get("", response_model=list[BikeSummary])
@@ -24,6 +32,7 @@ def list_bikes():
 @router.get("/{bike_id}", response_model=BikeDetail)
 def get_bike(bike_id: str):
     """Fetch full specs: top speed, weight, engine cc, horsepower, year."""
+    _ensure_bike_uuid(bike_id)
     db = get_supabase()
     res = db.table(TABLE).select("*").eq("id", bike_id).limit(1).execute()
     if not res.data:
@@ -46,6 +55,7 @@ def create_bike(body: BikeCreate, owner: dict = Depends(require_active_owner)):
 @router.patch("/{bike_id}", response_model=BikeDetail)
 def update_bike(bike_id: str, body: BikeUpdate, owner: dict = Depends(require_active_owner)):
     """Partially update an existing bike (owner of the bike, or admin)."""
+    _ensure_bike_uuid(bike_id)
     db = get_supabase()
     payload = body.model_dump(exclude_none=True)
     if not payload:
@@ -60,6 +70,7 @@ def update_bike(bike_id: str, body: BikeUpdate, owner: dict = Depends(require_ac
 @router.delete("/{bike_id}", status_code=204)
 def delete_bike(bike_id: str, owner: dict = Depends(require_active_owner)):
     """Delete a bike record (owner of the bike, or admin)."""
+    _ensure_bike_uuid(bike_id)
     db = get_supabase()
     _assert_can_manage(db, bike_id, owner)
     db.table(TABLE).delete().eq("id", bike_id).execute()
@@ -84,6 +95,7 @@ async def upload_bike_image(
     owner: dict = Depends(require_active_owner),
 ):
     """Upload an image to Supabase Storage and attach its public URL to the bike."""
+    _ensure_bike_uuid(bike_id)
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=400,
@@ -106,8 +118,8 @@ async def upload_bike_image(
             file=content,
             file_options={"content-type": file.content_type, "upsert": "true"},
         )
-    except Exception as exc:  # noqa: BLE001 — surface storage errors to the client
-        raise HTTPException(status_code=500, detail=f"Image upload failed: {exc}")
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="Image upload failed")
 
     public_url = storage.get_public_url(object_path)
 

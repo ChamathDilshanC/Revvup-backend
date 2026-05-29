@@ -2,6 +2,8 @@ import uuid
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+
+from app.core.exceptions import bad_request, conflict, forbidden, internal_error, unauthorized
 from fastapi.responses import HTMLResponse
 
 from app.core.config import get_settings
@@ -29,11 +31,11 @@ def register(body: RegisterRequest):
       with admin CRUD capabilities.
     """
     if len(body.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        raise bad_request("Password must be at least 8 characters", field="password")
 
     is_owner = body.role == "showroom_owner"
     if is_owner and not body.showroom_name:
-        raise HTTPException(status_code=400, detail="showroom_name is required for showroom owners")
+        raise bad_request("showroom_name is required for showroom owners", field="showroom_name")
 
     db = get_supabase()
 
@@ -47,12 +49,15 @@ def register(body: RegisterRequest):
                 "user_metadata": {"full_name": body.full_name, "role": body.role},
             }
         )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"Registration failed: {exc}")
+    except Exception:  # noqa: BLE001
+        raise conflict(
+            "Registration failed. This email may already be registered.",
+            code="REGISTRATION_FAILED",
+        )
 
     user = getattr(created, "user", None)
     if user is None:
-        raise HTTPException(status_code=400, detail="Registration failed")
+        raise bad_request("Registration failed", code="REGISTRATION_FAILED")
 
     status = "pending" if is_owner else "active"
     token = str(uuid.uuid4()) if is_owner else None
@@ -76,7 +81,7 @@ def register(body: RegisterRequest):
             db.auth.admin.delete_user(user.id)
         except Exception:  # noqa: BLE001
             pass
-        raise HTTPException(status_code=500, detail="Failed to create profile")
+        raise internal_error("Failed to create profile")
 
     profile = _profile_from_row(inserted.data[0])
 
@@ -108,13 +113,13 @@ def login(body: LoginRequest):
 
     res = db.table(PROFILES).select("*").eq("id", session["user_id"]).limit(1).execute()
     if not res.data:
-        raise HTTPException(status_code=403, detail="Profile not found")
+        raise forbidden("Profile not found", code="PROFILE_NOT_FOUND")
     profile = _profile_from_row(res.data[0])
 
     if profile.status == "pending":
-        raise HTTPException(status_code=403, detail="Account is pending approval")
+        raise forbidden("Account is pending approval", code="ACCOUNT_PENDING")
     if profile.status == "rejected":
-        raise HTTPException(status_code=403, detail="Account request was rejected")
+        raise forbidden("Account request was rejected", code="ACCOUNT_REJECTED")
 
     return AuthResponse(
         access_token=session["access_token"],
@@ -179,9 +184,9 @@ def _sign_in(email: str, password: str) -> dict:
     try:
         result = db.auth.sign_in_with_password({"email": email, "password": password})
     except Exception:  # noqa: BLE001
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise unauthorized()
     if result.session is None or result.user is None:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise unauthorized()
     return {
         "access_token": result.session.access_token,
         "refresh_token": result.session.refresh_token,

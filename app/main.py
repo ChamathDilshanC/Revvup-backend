@@ -1,8 +1,16 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import admin, auth, bikes
 from app.core.config import get_settings
+from app.core.handlers import register_exception_handlers, request_id_middleware
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 
 app = FastAPI(
     title="RevvUp API",
@@ -11,6 +19,9 @@ app = FastAPI(
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
+
+register_exception_handlers(app)
+app.middleware("http")(request_id_middleware)
 
 app.add_middleware(
     CORSMiddleware,

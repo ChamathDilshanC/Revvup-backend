@@ -1,9 +1,9 @@
 from functools import lru_cache
 
-from fastapi import HTTPException
 from supabase import Client, create_client
 
 from app.core.config import get_settings
+from app.core.exceptions import service_unavailable
 
 
 @lru_cache
@@ -16,12 +16,9 @@ def get_supabase() -> Client:
     """
     settings = get_settings()
     if not settings.is_configured:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Supabase is not configured. Set SUPABASE_URL and "
-                "SUPABASE_SERVICE_KEY (or SUPABASE_ANON_KEY) environment variables."
-            ),
+        raise service_unavailable(
+            "Supabase is not configured. Set SUPABASE_URL and "
+            "SUPABASE_SERVICE_KEY (or SUPABASE_ANON_KEY) environment variables."
         )
     key = settings.supabase_service_key or settings.supabase_anon_key
     return create_client(settings.supabase_url, key)
