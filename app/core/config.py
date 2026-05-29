@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,6 +46,21 @@ class Settings(BaseSettings):
     @property
     def from_address(self) -> str:
         return self.smtp_from or self.smtp_user
+
+    @property
+    def effective_app_base_url(self) -> str:
+        """Public backend URL for approve/reject email links.
+
+        Uses APP_BASE_URL when set to a real host. On Vercel, if APP_BASE_URL
+        is still localhost (common copy-paste from .env.example), uses
+        https://<VERCEL_URL> automatically.
+        """
+        base = self.app_base_url.strip().rstrip("/")
+        is_local = not base or "localhost" in base or "127.0.0.1" in base
+        vercel_host = os.environ.get("VERCEL_URL", "").strip()
+        if vercel_host and is_local:
+            return f"https://{vercel_host}"
+        return base or "http://localhost:8000"
 
 
 @lru_cache

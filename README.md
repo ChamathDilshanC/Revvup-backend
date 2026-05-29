@@ -178,7 +178,11 @@ vercel
 vercel --prod
 ```
 
-Ensure `vercel.json` points `api/index.py` to `@vercel/python`. In the Vercel dashboard, set the environment variables from `.env.example` (`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET`) for the Production environment.
+Ensure `vercel.json` points `api/index.py` to `@vercel/python`. In the Vercel dashboard, set the environment variables from `.env.example` for **Production**, including:
+
+- `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET`
+- `SMTP_*`, `DEVELOPER_EMAIL`
+- **`APP_BASE_URL=https://revvup-backend.vercel.app`** — approve/reject links in the owner email use this host (if left as `localhost`, the backend auto-uses `https://$VERCEL_URL` on Vercel after redeploy)
 
 ## Dependencies
 

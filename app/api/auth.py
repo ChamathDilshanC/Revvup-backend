@@ -213,7 +213,7 @@ def _sign_in(email: str, password: str) -> dict:
 
 def _send_owner_approval_email(body: RegisterRequest, token: str) -> None:
     settings = get_settings()
-    base = settings.app_base_url.rstrip("/")
+    base = settings.effective_app_base_url
     approve_url = f"{base}/api/v1/auth/confirm?{urlencode({'token': token, 'action': 'approve'})}"
     reject_url = f"{base}/api/v1/auth/confirm?{urlencode({'token': token, 'action': 'reject'})}"
 
