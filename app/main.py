@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, bikes
+from app.api import admin, auth, bikes
+from app.core.config import get_settings
 
 app = FastAPI(
     title="RevvUp API",
@@ -21,8 +22,13 @@ app.add_middleware(
 
 app.include_router(bikes.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(admin.router, prefix="/api/v1")
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "revvup-backend"}
+    return {
+        "status": "ok",
+        "service": "revvup-backend",
+        "supabase_configured": get_settings().is_configured,
+    }

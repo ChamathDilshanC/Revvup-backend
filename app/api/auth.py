@@ -1,46 +1,211 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, EmailStr
+import uuid
+from urllib.parse import urlencode
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
+
+from app.core.config import get_settings
+from app.core.email import build_owner_approval_email, result_page, send_email
+from app.core.security import get_current_profile
+from app.core.supabase_client import get_supabase
+from app.models.user import AuthResponse, LoginRequest, Profile, RegisterRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+PROFILES = "profiles"
 
 
-class RegisterRequest(BaseModel):
-    email: EmailStr
-    password: str
-    full_name: str
+def _profile_from_row(row: dict) -> Profile:
+    return Profile.model_validate(row)
 
 
-class AuthResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user_id: str
-    email: EmailStr
+@router.post("/register", response_model=AuthResponse, status_code=201)
+def register(body: RegisterRequest):
+    """Register a client or a bike showroom owner.
+
+    - **client**: account is active immediately and can log in.
+    - **showroom_owner**: account is created as *pending*. An HTML approval
+      email is sent to the developer; once approved the account is activated
+      with admin CRUD capabilities.
+    """
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    is_owner = body.role == "showroom_owner"
+    if is_owner and not body.showroom_name:
+        raise HTTPException(status_code=400, detail="showroom_name is required for showroom owners")
+
+    db = get_supabase()
+
+    # Create a confirmed auth user via the admin API (service role key).
+    try:
+        created = db.auth.admin.create_user(
+            {
+                "email": body.email,
+                "password": body.password,
+                "email_confirm": True,
+                "user_metadata": {"full_name": body.full_name, "role": body.role},
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Registration failed: {exc}")
+
+    user = getattr(created, "user", None)
+    if user is None:
+        raise HTTPException(status_code=400, detail="Registration failed")
+
+    status = "pending" if is_owner else "active"
+    token = str(uuid.uuid4()) if is_owner else None
+
+    profile_row = {
+        "id": user.id,
+        "email": body.email,
+        "full_name": body.full_name,
+        "role": body.role,
+        "status": status,
+        "showroom_name": body.showroom_name,
+        "showroom_address": body.showroom_address,
+        "phone": body.phone,
+        "confirmation_token": token,
+    }
+
+    inserted = db.table(PROFILES).insert(profile_row).execute()
+    if not inserted.data:
+        # Roll back the auth user so the email can be reused.
+        try:
+            db.auth.admin.delete_user(user.id)
+        except Exception:  # noqa: BLE001
+            pass
+        raise HTTPException(status_code=500, detail="Failed to create profile")
+
+    profile = _profile_from_row(inserted.data[0])
+
+    if is_owner:
+        _send_owner_approval_email(body, token)
+        return AuthResponse(
+            profile=profile,
+            message=(
+                "Your showroom owner account is pending approval. "
+                "You'll be able to log in once the RevvUp team approves it."
+            ),
+        )
+
+    # Clients get a session immediately.
+    session = _sign_in(body.email, body.password)
+    return AuthResponse(
+        access_token=session["access_token"],
+        refresh_token=session["refresh_token"],
+        profile=profile,
+        message="Welcome to RevvUp!",
+    )
 
 
 @router.post("/login", response_model=AuthResponse)
 def login(body: LoginRequest):
-    """Mock login — replace with real auth provider in production."""
-    if not body.password or len(body.password) < 6:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    """Authenticate via Supabase Auth and return the profile + role."""
+    db = get_supabase()
+    session = _sign_in(body.email, body.password)
+
+    res = db.table(PROFILES).select("*").eq("id", session["user_id"]).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status_code=403, detail="Profile not found")
+    profile = _profile_from_row(res.data[0])
+
+    if profile.status == "pending":
+        raise HTTPException(status_code=403, detail="Account is pending approval")
+    if profile.status == "rejected":
+        raise HTTPException(status_code=403, detail="Account request was rejected")
+
     return AuthResponse(
-        access_token="mock_jwt_token_revvup",
-        user_id="user_001",
-        email=body.email,
+        access_token=session["access_token"],
+        refresh_token=session["refresh_token"],
+        profile=profile,
     )
 
 
-@router.post("/register", response_model=AuthResponse)
-def register(body: RegisterRequest):
-    """Mock registration — replace with database + hashed passwords."""
-    if len(body.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-    return AuthResponse(
-        access_token="mock_jwt_token_revvup_new",
-        user_id="user_new_001",
+@router.get("/me", response_model=Profile)
+def me(profile: dict = Depends(get_current_profile)):
+    """Return the current authenticated user's profile."""
+    return _profile_from_row(profile)
+
+
+@router.get("/confirm", response_class=HTMLResponse)
+def confirm_owner(
+    token: str = Query(...),
+    action: str = Query("approve", pattern="^(approve|reject)$"),
+):
+    """Developer-facing endpoint hit from the approval email's buttons."""
+    db = get_supabase()
+    res = db.table(PROFILES).select("*").eq("confirmation_token", token).limit(1).execute()
+    if not res.data:
+        return HTMLResponse(
+            result_page(
+                title="Link expired",
+                message="This approval link is invalid or has already been used.",
+                ok=False,
+            ),
+            status_code=404,
+        )
+
+    profile = res.data[0]
+    new_status = "active" if action == "approve" else "rejected"
+
+    db.table(PROFILES).update(
+        {"status": new_status, "confirmation_token": None}
+    ).eq("id", profile["id"]).execute()
+
+    if action == "approve":
+        return HTMLResponse(
+            result_page(
+                title="Showroom owner approved",
+                message=f"{profile.get('full_name') or profile['email']} can now log in with admin capabilities.",
+                ok=True,
+            )
+        )
+    return HTMLResponse(
+        result_page(
+            title="Request rejected",
+            message=f"The request from {profile.get('full_name') or profile['email']} has been rejected.",
+            ok=False,
+        )
+    )
+
+
+# --- helpers --------------------------------------------------------------
+
+
+def _sign_in(email: str, password: str) -> dict:
+    db = get_supabase()
+    try:
+        result = db.auth.sign_in_with_password({"email": email, "password": password})
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if result.session is None or result.user is None:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {
+        "access_token": result.session.access_token,
+        "refresh_token": result.session.refresh_token,
+        "user_id": result.user.id,
+    }
+
+
+def _send_owner_approval_email(body: RegisterRequest, token: str) -> None:
+    settings = get_settings()
+    base = settings.app_base_url.rstrip("/")
+    approve_url = f"{base}/api/v1/auth/confirm?{urlencode({'token': token, 'action': 'approve'})}"
+    reject_url = f"{base}/api/v1/auth/confirm?{urlencode({'token': token, 'action': 'reject'})}"
+
+    html = build_owner_approval_email(
+        full_name=body.full_name,
         email=body.email,
+        showroom_name=body.showroom_name,
+        showroom_address=body.showroom_address,
+        phone=body.phone,
+        approve_url=approve_url,
+        reject_url=reject_url,
+    )
+    send_email(
+        to=settings.developer_email,
+        subject=f"RevvUp — Approve showroom owner: {body.showroom_name or body.full_name}",
+        html=html,
     )

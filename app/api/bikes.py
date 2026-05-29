@@ -1,59 +1,117 @@
-from fastapi import APIRouter, HTTPException
+import uuid
 
-from app.models.bike import BikeDetail, BikeSummary
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+
+from app.core.config import get_settings
+from app.core.security import require_active_owner
+from app.core.supabase_client import get_supabase
+from app.models.bike import BikeCreate, BikeDetail, BikeSummary, BikeUpdate
 
 router = APIRouter(prefix="/bikes", tags=["bikes"])
 
-MOCK_BIKES: list[BikeDetail] = [
-    BikeDetail(
-        id="1",
-        name="Panigale V4 S",
-        brand="Ducati",
-        price=28995,
-        image_url="https://images.unsplash.com/photo-1558981403-c5f9899a28bc?w=800",
-        top_speed_mph=186,
-        weight_lbs=430,
-        engine_cc=1103,
-        horsepower=214,
-        year=2024,
-    ),
-    BikeDetail(
-        id="2",
-        name="S 1000 RR",
-        brand="BMW",
-        price=19995,
-        image_url="https://images.unsplash.com/photo-1568772585407-9361f9bf3a87?w=800",
-        top_speed_mph=186,
-        weight_lbs=437,
-        engine_cc=999,
-        horsepower=205,
-        year=2024,
-    ),
-    BikeDetail(
-        id="3",
-        name="CBR1000RR-R FIREBLADE SP",
-        brand="Honda",
-        price=28500,
-        image_url="https://images.unsplash.com/photo-1609630875171-a86a521a48fe?w=800",
-        top_speed_mph=180,
-        weight_lbs=443,
-        engine_cc=999,
-        horsepower=214,
-        year=2024,
-    ),
-]
+TABLE = "bikes"
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 @router.get("", response_model=list[BikeSummary])
 def list_bikes():
-    """Fetch premium bike catalog."""
-    return [BikeSummary.model_validate(b) for b in MOCK_BIKES]
+    """Fetch the premium bike catalog from Supabase."""
+    db = get_supabase()
+    res = db.table(TABLE).select("*").order("created_at", desc=True).execute()
+    return [BikeSummary.model_validate(row) for row in (res.data or [])]
 
 
 @router.get("/{bike_id}", response_model=BikeDetail)
 def get_bike(bike_id: str):
-    """Fetch structural/hardware specs: top speed, weight, engine cc, etc."""
-    for bike in MOCK_BIKES:
-        if bike.id == bike_id:
-            return bike
-    raise HTTPException(status_code=404, detail="Bike not found")
+    """Fetch full specs: top speed, weight, engine cc, horsepower, year."""
+    db = get_supabase()
+    res = db.table(TABLE).select("*").eq("id", bike_id).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Bike not found")
+    return BikeDetail.model_validate(res.data[0])
+
+
+@router.post("", response_model=BikeDetail, status_code=201)
+def create_bike(body: BikeCreate, owner: dict = Depends(require_active_owner)):
+    """Insert a new bike record into Supabase (showroom owners/admins only)."""
+    db = get_supabase()
+    payload = body.model_dump(exclude_none=True)
+    payload["owner_id"] = owner["id"]
+    res = db.table(TABLE).insert(payload).execute()
+    if not res.data:
+        raise HTTPException(status_code=500, detail="Failed to create bike")
+    return BikeDetail.model_validate(res.data[0])
+
+
+@router.patch("/{bike_id}", response_model=BikeDetail)
+def update_bike(bike_id: str, body: BikeUpdate, owner: dict = Depends(require_active_owner)):
+    """Partially update an existing bike (owner of the bike, or admin)."""
+    db = get_supabase()
+    payload = body.model_dump(exclude_none=True)
+    if not payload:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    _assert_can_manage(db, bike_id, owner)
+    res = db.table(TABLE).update(payload).eq("id", bike_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Bike not found")
+    return BikeDetail.model_validate(res.data[0])
+
+
+@router.delete("/{bike_id}", status_code=204)
+def delete_bike(bike_id: str, owner: dict = Depends(require_active_owner)):
+    """Delete a bike record (owner of the bike, or admin)."""
+    db = get_supabase()
+    _assert_can_manage(db, bike_id, owner)
+    db.table(TABLE).delete().eq("id", bike_id).execute()
+    return None
+
+
+def _assert_can_manage(db, bike_id: str, owner: dict) -> dict:
+    """Ensure the caller owns the bike (admins bypass this check)."""
+    res = db.table(TABLE).select("owner_id").eq("id", bike_id).limit(1).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Bike not found")
+    row = res.data[0]
+    if owner.get("role") != "admin" and row.get("owner_id") != owner["id"]:
+        raise HTTPException(status_code=403, detail="You can only manage your own bikes")
+    return row
+
+
+@router.post("/{bike_id}/image", response_model=BikeDetail)
+async def upload_bike_image(
+    bike_id: str,
+    file: UploadFile = File(...),
+    owner: dict = Depends(require_active_owner),
+):
+    """Upload an image to Supabase Storage and attach its public URL to the bike."""
+    if file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}",
+        )
+
+    db = get_supabase()
+    settings = get_settings()
+
+    _assert_can_manage(db, bike_id, owner)
+
+    content = await file.read()
+    extension = (file.filename or "").rsplit(".", 1)[-1].lower() or "jpg"
+    object_path = f"{bike_id}/{uuid.uuid4().hex}.{extension}"
+
+    storage = db.storage.from_(settings.supabase_bucket)
+    try:
+        storage.upload(
+            path=object_path,
+            file=content,
+            file_options={"content-type": file.content_type, "upsert": "true"},
+        )
+    except Exception as exc:  # noqa: BLE001 — surface storage errors to the client
+        raise HTTPException(status_code=500, detail=f"Image upload failed: {exc}")
+
+    public_url = storage.get_public_url(object_path)
+
+    res = db.table(TABLE).update({"image_url": public_url}).eq("id", bike_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=500, detail="Failed to attach image to bike")
+    return BikeDetail.model_validate(res.data[0])
