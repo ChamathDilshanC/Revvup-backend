@@ -1,6 +1,7 @@
 import logging
+import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import admin, auth, bikes
@@ -35,11 +36,49 @@ app.include_router(bikes.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
 
+_API_VERSION = "1.0.0"
 
-@app.get("/api/health")
-def health():
+
+def _health_payload() -> dict:
+    settings = get_settings()
     return {
         "status": "ok",
         "service": "revvup-backend",
-        "supabase_configured": get_settings().is_configured,
+        "version": _API_VERSION,
+        "environment": "production" if os.getenv("VERCEL") else "development",
+        "supabase_configured": settings.is_configured,
+        "email_configured": settings.email_configured,
     }
+
+
+@app.get("/", tags=["default"])
+def root(request: Request):
+    """API landing page — use this URL to discover docs and key routes."""
+    settings = get_settings()
+    base = str(request.base_url).rstrip("/")
+    return {
+        "success": True,
+        "service": "revvup-backend",
+        "version": _API_VERSION,
+        "message": "RevvUp API is running. Explore interactive docs or call the endpoints below.",
+        "status": "online",
+        "supabase_configured": settings.is_configured,
+        "documentation": {
+            "swagger_ui": f"{base}/api/docs",
+            "openapi_json": f"{base}/api/openapi.json",
+        },
+        "links": {
+            "health": f"{base}/api/health",
+            "bikes_catalog": f"{base}/api/v1/bikes",
+            "register": f"{base}/api/v1/auth/register",
+            "login": f"{base}/api/v1/auth/login",
+        },
+        "api_prefix": "/api/v1",
+    }
+
+
+@app.get("/api/health", tags=["default"])
+@app.get("/health", tags=["default"])
+def health():
+    """Liveness check for monitors and deploy verification."""
+    return _health_payload()
