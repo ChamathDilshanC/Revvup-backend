@@ -38,6 +38,31 @@ app.include_router(admin.router, prefix="/api/v1")
 
 _API_VERSION = "1.0.0"
 
+_PROJECT_IDEA = {
+    "name": "RevvUp",
+    "tagline": "Premium motorbike marketplace",
+    "summary": (
+        "A mobile-first platform where enthusiasts browse premium motorcycles and "
+        "verified bike showroom owners list inventory, manage listings (CRUD), and "
+        "upload images. Showroom owners register with developer approval before gaining "
+        "admin capabilities."
+    ),
+    "stack": ["React Native (Expo)", "FastAPI", "Supabase", "Vercel"],
+    "features": [
+        "Public bike catalog with detailed specs",
+        "Client vs showroom-owner registration",
+        "Developer email approval for showroom owners",
+        "Owner/admin bike CRUD and image upload to Supabase Storage",
+    ],
+}
+
+_DEVELOPER_CONTACT = {
+    "name": "Chamath Dilshan",
+    "email": "dilshancolonne123@gmail.com",
+    "github": "https://github.com/chamathdilshanc",
+    "linkedin": "https://www.linkedin.com/in/chamathdilsahnc/",
+}
+
 
 def _health_payload() -> dict:
     settings = get_settings()
@@ -67,6 +92,8 @@ def root(request: Request):
             "swagger_ui": f"{base}/api/docs",
             "openapi_json": f"{base}/api/openapi.json",
         },
+        "project": _PROJECT_IDEA,
+        "developer": _DEVELOPER_CONTACT,
         "links": {
             "health": f"{base}/api/health",
             "bikes_catalog": f"{base}/api/v1/bikes",
