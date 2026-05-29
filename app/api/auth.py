@@ -39,6 +39,21 @@ def register(body: RegisterRequest):
 
     db = get_supabase()
 
+    existing = db.table(PROFILES).select("email, role, status").eq("email", body.email).limit(1).execute()
+    if existing.data:
+        row = existing.data[0]
+        if row.get("role") == "showroom_owner" and row.get("status") == "pending":
+            raise conflict(
+                "Your showroom owner application is already pending approval. "
+                "Please wait for the RevvUp team to review your request. "
+                "You will be able to sign in after approval.",
+                code="OWNER_PENDING",
+            )
+        raise conflict(
+            "This email is already registered. Try signing in instead.",
+            code="EMAIL_EXISTS",
+        )
+
     # Create a confirmed auth user via the admin API (service role key).
     try:
         created = db.auth.admin.create_user(
@@ -90,8 +105,10 @@ def register(body: RegisterRequest):
         return AuthResponse(
             profile=profile,
             message=(
-                "Your showroom owner account is pending approval. "
-                "You'll be able to log in once the RevvUp team approves it."
+                "Your showroom owner application was submitted successfully and is now "
+                "pending approval. We emailed the RevvUp team to review your showroom details. "
+                "You cannot register again until a decision is made. Once approved, sign in "
+                "with the same email and password you used here."
             ),
         )
 
