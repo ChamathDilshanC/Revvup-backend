@@ -31,6 +31,19 @@ class Profile(BaseModel):
     showroom_name: str | None = None
     showroom_address: str | None = None
     phone: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+class ProfileUpdateRequest(BaseModel):
+    """Showroom owners update shop details and map location."""
+
+    full_name: str | None = None
+    showroom_name: str | None = None
+    showroom_address: str | None = None
+    phone: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 class AuthResponse(BaseModel):

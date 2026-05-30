@@ -8,9 +8,9 @@ from fastapi.responses import HTMLResponse
 
 from app.core.config import get_settings
 from app.core.email import build_owner_approval_email, result_page, send_email
-from app.core.security import get_current_profile
+from app.core.security import get_current_profile, require_active_owner
 from app.core.supabase_client import get_supabase
-from app.models.user import AuthResponse, LoginRequest, Profile, RegisterRequest
+from app.models.user import AuthResponse, LoginRequest, Profile, ProfileUpdateRequest, RegisterRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -149,6 +149,25 @@ def login(body: LoginRequest):
 def me(profile: dict = Depends(get_current_profile)):
     """Return the current authenticated user's profile."""
     return _profile_from_row(profile)
+
+
+@router.patch("/me", response_model=Profile)
+def update_me(body: ProfileUpdateRequest, owner: dict = Depends(require_active_owner)):
+    """Update showroom profile and map pin (active showroom owners / admins)."""
+    payload = body.model_dump(exclude_none=True)
+    if not payload:
+        raise bad_request("No fields to update")
+
+    if body.latitude is not None and not (-90 <= body.latitude <= 90):
+        raise bad_request("latitude must be between -90 and 90", field="latitude")
+    if body.longitude is not None and not (-180 <= body.longitude <= 180):
+        raise bad_request("longitude must be between -180 and 180", field="longitude")
+
+    db = get_supabase()
+    res = db.table(PROFILES).update(payload).eq("id", owner["id"]).execute()
+    if not res.data:
+        raise internal_error("Failed to update profile")
+    return _profile_from_row(res.data[0])
 
 
 @router.get("/confirm", response_class=HTMLResponse)

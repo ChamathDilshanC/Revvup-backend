@@ -11,6 +11,8 @@ class BikeSummary(BaseModel):
     owner_id: str | None = None
     showroom_name: str | None = None
     showroom_address: str | None = None
+    showroom_latitude: float | None = None
+    showroom_longitude: float | None = None
 
 
 class BikeDetail(BikeSummary):

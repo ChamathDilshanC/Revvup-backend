@@ -33,7 +33,7 @@ def _attach_showroom_info(rows: list[dict]) -> list[dict]:
     db = get_supabase()
     prof_res = (
         db.table(PROFILES)
-        .select("id, showroom_name, showroom_address, phone, full_name")
+        .select("id, showroom_name, showroom_address, phone, full_name, latitude, longitude")
         .in_("id", owner_ids)
         .execute()
     )
@@ -45,6 +45,8 @@ def _attach_showroom_info(rows: list[dict]) -> list[dict]:
         prof = by_id.get(item.get("owner_id"), {})
         item["showroom_name"] = prof.get("showroom_name") or prof.get("full_name")
         item["showroom_address"] = prof.get("showroom_address")
+        item["showroom_latitude"] = prof.get("latitude")
+        item["showroom_longitude"] = prof.get("longitude")
         enriched.append(item)
     return enriched
 
