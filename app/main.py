@@ -4,7 +4,7 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import admin, auth, bikes, owner_bikes, showrooms
+from app.api import admin, auth, bikes
 from app.core.config import get_settings
 from app.core.handlers import register_exception_handlers, request_id_middleware
 
@@ -34,9 +34,6 @@ app.add_middleware(
 
 app.include_router(bikes.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
-app.include_router(owner_bikes.router, prefix="/api/v1")
-app.include_router(showrooms.router, prefix="/api/v1")
-app.include_router(showrooms.owner_router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
 
 _API_VERSION = "1.0.0"
@@ -100,8 +97,6 @@ def root(request: Request):
         "links": {
             "health": f"{base}/api/health",
             "bikes_catalog": f"{base}/api/v1/bikes",
-            "owner_bikes": f"{base}/api/v1/owner/bikes",
-            "showrooms": f"{base}/api/v1/showrooms",
             "register": f"{base}/api/v1/auth/register",
             "login": f"{base}/api/v1/auth/login",
         },

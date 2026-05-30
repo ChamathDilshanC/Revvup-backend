@@ -8,6 +8,9 @@ class BikeSummary(BaseModel):
     price: float
     image_url: str | None = None
     top_speed_mph: int | None = None
+    owner_id: str | None = None
+    showroom_name: str | None = None
+    showroom_address: str | None = None
 
 
 class BikeDetail(BikeSummary):
