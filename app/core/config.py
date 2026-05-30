@@ -37,7 +37,13 @@ class Settings(BaseSettings):
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.supabase_url and (self.supabase_service_key or self.supabase_anon_key))
+        has_key = bool(
+            self.supabase_service_key
+            or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            or os.getenv("SUPABASE_SERVICE_KEY")
+            or self.supabase_anon_key
+        )
+        return bool(self.supabase_url and has_key)
 
     @property
     def email_configured(self) -> bool:

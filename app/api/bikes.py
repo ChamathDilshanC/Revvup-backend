@@ -1,8 +1,10 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.core.config import get_settings
+from app.core.supabase_client import _service_role_key
 from app.core.exceptions import not_found
 from app.core.security import require_active_owner
 from app.core.supabase_client import get_supabase
@@ -13,6 +15,24 @@ router = APIRouter(prefix="/bikes", tags=["bikes"])
 TABLE = "bikes"
 PROFILES = "profiles"
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+logger = logging.getLogger("revvup.bikes")
+
+_PROFILE_SELECT_WITH_MAP = (
+    "id, showroom_name, showroom_address, phone, full_name, latitude, longitude"
+)
+_PROFILE_SELECT_BASE = "id, showroom_name, showroom_address, phone, full_name"
+
+
+def _resolve_image_content_type(file: UploadFile) -> str:
+    """React Native uploads often omit content_type — infer from filename."""
+    if file.content_type in ALLOWED_IMAGE_TYPES:
+        return file.content_type
+    name = (file.filename or "").lower()
+    if name.endswith(".png"):
+        return "image/png"
+    if name.endswith(".webp"):
+        return "image/webp"
+    return "image/jpeg"
 
 
 def _ensure_bike_uuid(bike_id: str) -> None:
@@ -31,13 +51,8 @@ def _attach_showroom_info(rows: list[dict]) -> list[dict]:
         return rows
 
     db = get_supabase()
-    prof_res = (
-        db.table(PROFILES)
-        .select("id, showroom_name, showroom_address, phone, full_name, latitude, longitude")
-        .in_("id", owner_ids)
-        .execute()
-    )
-    by_id = {p["id"]: p for p in (prof_res.data or [])}
+    profiles = _fetch_owner_profiles(db, owner_ids)
+    by_id = {p["id"]: p for p in profiles}
 
     enriched: list[dict] = []
     for row in rows:
@@ -51,12 +66,50 @@ def _attach_showroom_info(rows: list[dict]) -> list[dict]:
     return enriched
 
 
+def _fetch_owner_profiles(db, owner_ids: list) -> list[dict]:
+    """Load owner profiles; fall back if map columns are not migrated yet."""
+    try:
+        res = (
+            db.table(PROFILES)
+            .select(_PROFILE_SELECT_WITH_MAP)
+            .in_("id", owner_ids)
+            .execute()
+        )
+        return res.data or []
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Profile map columns unavailable — run supabase_migrations/add_showroom_location.sql",
+            exc_info=True,
+        )
+        res = (
+            db.table(PROFILES)
+            .select(_PROFILE_SELECT_BASE)
+            .in_("id", owner_ids)
+            .execute()
+        )
+        return res.data or []
+
+
+def _normalize_bike_row(row: dict) -> dict:
+    """Coerce Supabase JSON types for Pydantic response models."""
+    item = dict(row)
+    for key in ("id", "owner_id"):
+        if item.get(key) is not None:
+            item[key] = str(item[key])
+    if item.get("price") is not None:
+        item["price"] = float(item["price"])
+    for key in ("top_speed_mph", "weight_lbs", "engine_cc", "horsepower", "year"):
+        if item.get(key) is not None:
+            item[key] = int(round(float(item[key])))
+    return item
+
+
 def _to_summary(row: dict) -> BikeSummary:
-    return BikeSummary.model_validate(row)
+    return BikeSummary.model_validate(_normalize_bike_row(row))
 
 
 def _to_detail(row: dict) -> BikeDetail:
-    return BikeDetail.model_validate(row)
+    return BikeDetail.model_validate(_normalize_bike_row(row))
 
 
 @router.get("", response_model=list[BikeSummary])
@@ -95,14 +148,32 @@ def get_bike(bike_id: str):
 @router.post("", response_model=BikeDetail, status_code=201)
 def create_bike(body: BikeCreate, owner: dict = Depends(require_active_owner)):
     """Insert a new bike (active showroom owner / admin)."""
+    settings = get_settings()
+    if not _service_role_key(settings):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Server cannot write to the database. Set SUPABASE_SERVICE_KEY "
+                "(service role) on the backend — the anon key cannot create bikes."
+            ),
+        )
+
     db = get_supabase()
     payload = body.model_dump(exclude_none=True)
     payload["owner_id"] = owner["id"]
-    res = db.table(TABLE).insert(payload).execute()
+    try:
+        res = db.table(TABLE).insert(payload).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Supabase insert bike failed")
+        raise HTTPException(status_code=500, detail=f"Failed to create bike: {exc}") from exc
     if not res.data:
         raise HTTPException(status_code=500, detail="Failed to create bike")
-    row = _attach_showroom_info(res.data)[0]
-    return _to_detail(row)
+    try:
+        row = _attach_showroom_info(res.data)[0]
+        return _to_detail(row)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Bike create response build failed")
+        raise HTTPException(status_code=500, detail=f"Failed to create bike: {exc}") from exc
 
 
 @router.patch("/{bike_id}", response_model=BikeDetail)
@@ -162,15 +233,19 @@ async def upload_bike_image(
     _assert_can_manage(db, bike_id, owner)
 
     content = await file.read()
-    extension = (file.filename or "").rsplit(".", 1)[-1].lower() or "jpg"
-    object_path = f"{bike_id}/{uuid.uuid4().hex}.{extension}"
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
+    if ext in ("jpeg", "jpg", ""):
+        ext = "jpg"
+    elif ext not in ("png", "webp"):
+        ext = "jpg"
+    object_path = f"{bike_id}/{uuid.uuid4().hex}.{ext}"
 
     storage = db.storage.from_(settings.supabase_bucket)
     try:
         storage.upload(
             path=object_path,
             file=content,
-            file_options={"content-type": file.content_type, "upsert": "true"},
+            file_options={"content-type": content_type, "upsert": "true"},
         )
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="Image upload failed")
