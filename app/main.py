@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import admin, auth, bikes
 from app.core.config import get_settings
 from app.core.handlers import register_exception_handlers, request_id_middleware
+from app.core.supabase_client import get_supabase
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,6 +102,41 @@ def root(request: Request):
             "login": f"{base}/api/v1/auth/login",
         },
         "api_prefix": "/api/v1",
+    }
+
+
+@app.get("/api/health/supabase", tags=["default"])
+async def health_supabase():
+    """Verify outbound connectivity to Supabase (safe for production debugging)."""
+    import socket
+
+    settings = get_settings()
+    host = settings.supabase_url.replace("https://", "").replace("http://", "").split("/")[0]
+    dns_ok = False
+    dns_error = None
+    api_ok = False
+    api_error = None
+
+    try:
+        socket.getaddrinfo(host, 443)
+        dns_ok = True
+    except OSError as exc:
+        dns_error = str(exc)
+
+    try:
+        db = get_supabase()
+        db.rest_select("profiles", columns="id", limit=1)
+        api_ok = True
+    except Exception as exc:  # noqa: BLE001
+        api_error = str(exc)
+
+    return {
+        "host": host,
+        "dns_ok": dns_ok,
+        "dns_error": dns_error,
+        "api_ok": api_ok,
+        "api_error": api_error,
+        "supabase_configured": settings.is_configured,
     }
 
 

@@ -9,6 +9,7 @@ from app.core.email import build_owner_approval_email, result_page, send_email
 from app.core.exceptions import bad_request, conflict, forbidden, internal_error, unauthorized
 from app.core.security import get_current_profile, require_active_owner
 from app.core.supabase_client import get_supabase, get_supabase_as_user, get_supabase_auth
+from app.core.supabase_http import SupabaseHTTPError
 from app.models.user import AuthResponse, LoginRequest, Profile, ProfileUpdateRequest, RegisterRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -22,13 +23,7 @@ def _profile_from_row(row: dict) -> Profile:
 
 @router.post("/register", response_model=AuthResponse, status_code=201)
 async def register(body: RegisterRequest):
-    """Register a client or a bike showroom owner.
-
-    - **client**: account is active immediately and can log in.
-    - **showroom_owner**: account is created as *pending*. An HTML approval
-      email is sent to the developer; once approved the account is activated
-      with admin CRUD capabilities.
-    """
+    """Register a client or a bike showroom owner."""
     if len(body.password) < 8:
         raise bad_request("Password must be at least 8 characters", field="password")
 
@@ -36,17 +31,16 @@ async def register(body: RegisterRequest):
     if is_owner and not body.showroom_name:
         raise bad_request("showroom_name is required for showroom owners", field="showroom_name")
 
-    db = await get_supabase()
+    db = get_supabase()
 
-    existing = (
-        await db.table(PROFILES)
-        .select("email, role, status")
-        .eq("email", body.email)
-        .limit(1)
-        .execute()
+    existing = db.rest_select(
+        PROFILES,
+        columns="email, role, status",
+        filters={"email": f"eq.{body.email}"},
+        limit=1,
     )
-    if existing.data:
-        row = existing.data[0]
+    if existing:
+        row = existing[0]
         if row.get("role") == "showroom_owner" and row.get("status") == "pending":
             raise conflict(
                 "Your showroom owner application is already pending approval. "
@@ -60,7 +54,7 @@ async def register(body: RegisterRequest):
         )
 
     try:
-        created = await db.auth.admin.create_user(
+        created = db.auth_admin_create_user(
             {
                 "email": body.email,
                 "password": body.password,
@@ -68,21 +62,21 @@ async def register(body: RegisterRequest):
                 "user_metadata": {"full_name": body.full_name, "role": body.role},
             }
         )
-    except Exception:  # noqa: BLE001
+    except SupabaseHTTPError:
         raise conflict(
             "Registration failed. This email may already be registered.",
             code="REGISTRATION_FAILED",
         )
 
-    user = getattr(created, "user", None)
-    if user is None:
+    user_id = created.get("id")
+    if not user_id:
         raise bad_request("Registration failed", code="REGISTRATION_FAILED")
 
     status = "pending" if is_owner else "active"
     token = str(uuid.uuid4()) if is_owner else None
 
     profile_row = {
-        "id": user.id,
+        "id": user_id,
         "email": body.email,
         "full_name": body.full_name,
         "role": body.role,
@@ -93,15 +87,23 @@ async def register(body: RegisterRequest):
         "confirmation_token": token,
     }
 
-    inserted = await db.table(PROFILES).insert(profile_row).execute()
-    if not inserted.data:
+    try:
+        inserted = db.rest_insert(PROFILES, profile_row)
+    except SupabaseHTTPError:
         try:
-            await db.auth.admin.delete_user(user.id)
-        except Exception:  # noqa: BLE001
+            db.auth_admin_delete_user(user_id)
+        except SupabaseHTTPError:
             pass
         raise internal_error("Failed to create profile")
 
-    profile = _profile_from_row(inserted.data[0])
+    if not inserted:
+        try:
+            db.auth_admin_delete_user(user_id)
+        except SupabaseHTTPError:
+            pass
+        raise internal_error("Failed to create profile")
+
+    profile = _profile_from_row(inserted[0])
 
     if is_owner:
         _send_owner_approval_email(body, token)
@@ -115,7 +117,7 @@ async def register(body: RegisterRequest):
             ),
         )
 
-    session = await _sign_in(body.email, body.password)
+    session = _sign_in(body.email, body.password)
     return AuthResponse(
         access_token=session["access_token"],
         refresh_token=session["refresh_token"],
@@ -127,19 +129,17 @@ async def register(body: RegisterRequest):
 @router.post("/login", response_model=AuthResponse)
 async def login(body: LoginRequest):
     """Authenticate via Supabase Auth and return the profile + role."""
-    session = await _sign_in(body.email, body.password)
+    session = _sign_in(body.email, body.password)
 
-    user_db = await get_supabase_as_user(session["access_token"])
-    res = (
-        await user_db.table(PROFILES)
-        .select("*")
-        .eq("id", session["user_id"])
-        .limit(1)
-        .execute()
+    user_db = get_supabase_as_user(session["access_token"])
+    rows = user_db.rest_select(
+        PROFILES,
+        filters={"id": f"eq.{session['user_id']}"},
+        limit=1,
     )
-    if not res.data:
+    if not rows:
         raise forbidden("Profile not found", code="PROFILE_NOT_FOUND")
-    profile = _profile_from_row(res.data[0])
+    profile = _profile_from_row(rows[0])
 
     if profile.status == "pending":
         raise forbidden("Account is pending approval", code="ACCOUNT_PENDING")
@@ -155,13 +155,11 @@ async def login(body: LoginRequest):
 
 @router.get("/me", response_model=Profile)
 async def me(profile: dict = Depends(get_current_profile)):
-    """Return the current authenticated user's profile."""
     return _profile_from_row(profile)
 
 
 @router.patch("/me", response_model=Profile)
 async def update_me(body: ProfileUpdateRequest, owner: dict = Depends(require_active_owner)):
-    """Update showroom profile and map pin (active showroom owners / admins)."""
     payload = body.model_dump(exclude_none=True)
     if not payload:
         raise bad_request("No fields to update")
@@ -171,11 +169,11 @@ async def update_me(body: ProfileUpdateRequest, owner: dict = Depends(require_ac
     if body.longitude is not None and not (-180 <= body.longitude <= 180):
         raise bad_request("longitude must be between -180 and 180", field="longitude")
 
-    db = await get_supabase()
-    res = await db.table(PROFILES).update(payload).eq("id", owner["id"]).execute()
-    if not res.data:
+    db = get_supabase()
+    rows = db.rest_update(PROFILES, {"id": f"eq.{owner['id']}"}, payload)
+    if not rows:
         raise internal_error("Failed to update profile")
-    return _profile_from_row(res.data[0])
+    return _profile_from_row(rows[0])
 
 
 @router.get("/confirm", response_class=HTMLResponse)
@@ -183,16 +181,13 @@ async def confirm_owner(
     token: str = Query(...),
     action: str = Query("approve", pattern="^(approve|reject)$"),
 ):
-    """Developer-facing endpoint hit from the approval email's buttons."""
-    db = await get_supabase()
-    res = (
-        await db.table(PROFILES)
-        .select("*")
-        .eq("confirmation_token", token)
-        .limit(1)
-        .execute()
+    db = get_supabase()
+    rows = db.rest_select(
+        PROFILES,
+        filters={"confirmation_token": f"eq.{token}"},
+        limit=1,
     )
-    if not res.data:
+    if not rows:
         return HTMLResponse(
             result_page(
                 title="Link expired",
@@ -202,12 +197,14 @@ async def confirm_owner(
             status_code=404,
         )
 
-    profile = res.data[0]
+    profile = rows[0]
     new_status = "active" if action == "approve" else "rejected"
 
-    await db.table(PROFILES).update(
-        {"status": new_status, "confirmation_token": None}
-    ).eq("id", profile["id"]).execute()
+    db.rest_update(
+        PROFILES,
+        {"id": f"eq.{profile['id']}"},
+        {"status": new_status, "confirmation_token": None},
+    )
 
     if action == "approve":
         return HTMLResponse(
@@ -226,18 +223,20 @@ async def confirm_owner(
     )
 
 
-async def _sign_in(email: str, password: str) -> dict:
-    db = await get_supabase_auth()
+def _sign_in(email: str, password: str) -> dict:
+    settings = get_settings()
+    db = get_supabase_auth()
     try:
-        result = await db.auth.sign_in_with_password({"email": email, "password": password})
-    except Exception as exc:  # noqa: BLE001
+        result = db.auth_sign_in(email, password, settings.supabase_anon_key)
+    except SupabaseHTTPError as exc:
         raise unauthorized("Invalid email or password. Check your details or register first.") from exc
-    if result.session is None or result.user is None:
+    user = result.get("user") or {}
+    if not result.get("access_token") or not user.get("id"):
         raise unauthorized()
     return {
-        "access_token": result.session.access_token,
-        "refresh_token": result.session.refresh_token,
-        "user_id": result.user.id,
+        "access_token": result["access_token"],
+        "refresh_token": result.get("refresh_token", ""),
+        "user_id": user["id"],
     }
 
 
