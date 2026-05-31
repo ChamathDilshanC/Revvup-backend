@@ -35,26 +35,6 @@ async def register(body: RegisterRequest):
 
     db = get_supabase()
 
-    existing = db.rest_select(
-        PROFILES,
-        columns="email, role, status",
-        filters={"email": f"eq.{body.email}"},
-        limit=1,
-    )
-    if existing:
-        row = existing[0]
-        if row.get("role") == "showroom_owner" and row.get("status") == "pending":
-            raise conflict(
-                "Your showroom owner application is already pending approval. "
-                "Please wait for the RevvUp team to review your request. "
-                "You will be able to sign in after approval.",
-                code="OWNER_PENDING",
-            )
-        raise conflict(
-            "This email is already registered. Try signing in instead.",
-            code="EMAIL_EXISTS",
-        )
-
     try:
         created = db.auth_admin_create_user(
             {
@@ -125,8 +105,7 @@ async def register(body: RegisterRequest):
             message=(
                 "Your showroom owner application was submitted successfully and is now "
                 f"pending approval. {email_note} "
-                "You cannot register again until a decision is made. Once approved, sign in "
-                "with the same email and password you used here."
+                "Once approved, sign in with the same email and password you used here."
             ),
         )
 
