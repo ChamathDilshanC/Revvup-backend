@@ -88,7 +88,7 @@ async def resend_owner_approval_email(user_id: str, _: dict = Depends(require_ad
         showroom_address=profile.get("showroom_address"),
         phone=profile.get("phone"),
     )
-    html = build_owner_approval_email(
+    html_body = build_owner_approval_email(
         full_name=body.full_name,
         email=body.email,
         showroom_name=body.showroom_name,
@@ -100,7 +100,7 @@ async def resend_owner_approval_email(user_id: str, _: dict = Depends(require_ad
     if not send_email(
         to=settings.developer_email,
         subject=f"RevvUp — Approve showroom owner: {body.showroom_name or body.full_name}",
-        html=html,
+        html_body=html_body,
     ):
         raise HTTPException(status_code=502, detail="Failed to send approval email")
     return None

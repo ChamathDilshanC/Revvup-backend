@@ -238,7 +238,7 @@ def _send_owner_approval_email(body: RegisterRequest, token: str) -> tuple[bool,
     approve_url = f"{base}/api/v1/auth/confirm?{urlencode({'token': token, 'action': 'approve'})}"
     reject_url = f"{base}/api/v1/auth/confirm?{urlencode({'token': token, 'action': 'reject'})}"
 
-    html = build_owner_approval_email(
+    html_body = build_owner_approval_email(
         full_name=body.full_name,
         email=body.email,
         showroom_name=body.showroom_name,
@@ -247,9 +247,13 @@ def _send_owner_approval_email(body: RegisterRequest, token: str) -> tuple[bool,
         approve_url=approve_url,
         reject_url=reject_url,
     )
-    sent = send_email(
-        to=settings.developer_email,
-        subject=f"RevvUp — Approve showroom owner: {body.showroom_name or body.full_name}",
-        html=html,
-    )
+    try:
+        sent = send_email(
+            to=settings.developer_email,
+            subject=f"RevvUp — Approve showroom owner: {body.showroom_name or body.full_name}",
+            html_body=html_body,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Approval email failed for %s", body.email)
+        sent = False
     return sent, approve_url
