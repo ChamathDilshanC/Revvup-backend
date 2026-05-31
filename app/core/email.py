@@ -1,10 +1,17 @@
 import html
+import json
+import logging
 import smtplib
+import ssl
+import urllib.error
+import urllib.request
 from email.message import EmailMessage
 from functools import lru_cache
 from pathlib import Path
 
 from app.core.config import get_settings
+
+logger = logging.getLogger("revvup.email")
 
 _LOGO_PATH = Path(__file__).resolve().parent.parent / "static" / "AppLogo.png"
 
@@ -75,15 +82,40 @@ def _detail_row(label: str, value: str) -> str:
 </tr>"""
 
 
-def send_email(to: str, subject: str, html_body: str) -> bool:
-    """Send an HTML email via SMTP."""
+def _send_via_resend(to: str, subject: str, html_body: str) -> bool:
     settings = get_settings()
-
-    if not settings.email_configured:
-        print("[email] SMTP not configured — would have sent:")
-        print(f"[email] To: {to}\n[email] Subject: {subject}\n{html_body[:500]}...")
+    payload = json.dumps(
+        {
+            "from": settings.from_address,
+            "to": [to],
+            "subject": subject,
+            "html": html_body,
+        }
+    ).encode()
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {settings.resend_api_key.strip()}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        logger.error("Resend API failed (%s): %s", exc.code, detail)
+        return False
+    except urllib.error.URLError as exc:
+        logger.error("Resend API unreachable: %s", exc.reason)
         return False
 
+
+def _send_via_smtp(to: str, subject: str, html_body: str) -> bool:
+    settings = get_settings()
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.from_address
@@ -99,8 +131,24 @@ def send_email(to: str, subject: str, html_body: str) -> bool:
             server.send_message(msg)
         return True
     except Exception as exc:  # noqa: BLE001
-        print(f"[email] Failed to send email: {exc}")
+        logger.error("SMTP send failed: %s", exc)
         return False
+
+
+def send_email(to: str, subject: str, html_body: str) -> bool:
+    """Send HTML email — Resend HTTP on Vercel, SMTP for local dev."""
+    settings = get_settings()
+
+    if settings.resend_configured:
+        if _send_via_resend(to, subject, html_body):
+            return True
+        logger.warning("Resend failed, trying SMTP fallback")
+
+    if settings.smtp_configured:
+        return _send_via_smtp(to, subject, html_body)
+
+    logger.warning("Email not configured — would have sent to %s: %s", to, subject)
+    return False
 
 
 def build_owner_approval_email(

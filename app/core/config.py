@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     smtp_from: str = ""
     smtp_use_tls: bool = True
 
+    # HTTP email (works on Vercel — Gmail SMTP is often blocked in serverless).
+    resend_api_key: str = ""
+    resend_from: str = ""
+
     @property
     def is_configured(self) -> bool:
         has_key = bool(
@@ -46,11 +50,21 @@ class Settings(BaseSettings):
         return bool(self.supabase_url and has_key)
 
     @property
-    def email_configured(self) -> bool:
+    def resend_configured(self) -> bool:
+        return bool(self.resend_api_key.strip())
+
+    @property
+    def smtp_configured(self) -> bool:
         return bool(self.smtp_host and self.smtp_user and self.smtp_password)
 
     @property
+    def email_configured(self) -> bool:
+        return self.resend_configured or self.smtp_configured
+
+    @property
     def from_address(self) -> str:
+        if self.resend_from.strip():
+            return self.resend_from.strip()
         return self.smtp_from or self.smtp_user
 
     @property

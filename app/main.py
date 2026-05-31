@@ -74,6 +74,8 @@ def _health_payload() -> dict:
         "environment": "production" if os.getenv("VERCEL") else "development",
         "supabase_configured": settings.is_configured,
         "email_configured": settings.email_configured,
+        "resend_configured": settings.resend_configured,
+        "smtp_configured": settings.smtp_configured,
     }
 
 

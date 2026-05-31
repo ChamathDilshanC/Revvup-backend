@@ -1,3 +1,4 @@
+import logging
 import uuid
 from urllib.parse import urlencode
 
@@ -15,6 +16,7 @@ from app.models.user import AuthResponse, LoginRequest, Profile, ProfileUpdateRe
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 PROFILES = "profiles"
+logger = logging.getLogger("revvup.auth")
 
 
 def _profile_from_row(row: dict) -> Profile:
@@ -106,12 +108,23 @@ async def register(body: RegisterRequest):
     profile = _profile_from_row(inserted[0])
 
     if is_owner:
-        _send_owner_approval_email(body, token)
+        email_sent, approve_url = _send_owner_approval_email(body, token)
+        if not email_sent:
+            logger.warning(
+                "Approval email not sent for %s. Manual approve: %s",
+                body.email,
+                approve_url,
+            )
+        email_note = (
+            "We emailed the RevvUp team to review your showroom details."
+            if email_sent
+            else "Your application is saved and pending manual review by the RevvUp team."
+        )
         return AuthResponse(
             profile=profile,
             message=(
                 "Your showroom owner application was submitted successfully and is now "
-                "pending approval. We emailed the RevvUp team to review your showroom details. "
+                f"pending approval. {email_note} "
                 "You cannot register again until a decision is made. Once approved, sign in "
                 "with the same email and password you used here."
             ),
@@ -240,7 +253,7 @@ def _sign_in(email: str, password: str) -> dict:
     }
 
 
-def _send_owner_approval_email(body: RegisterRequest, token: str) -> None:
+def _send_owner_approval_email(body: RegisterRequest, token: str) -> tuple[bool, str]:
     settings = get_settings()
     base = settings.effective_app_base_url
     approve_url = f"{base}/api/v1/auth/confirm?{urlencode({'token': token, 'action': 'approve'})}"
@@ -255,8 +268,9 @@ def _send_owner_approval_email(body: RegisterRequest, token: str) -> None:
         approve_url=approve_url,
         reject_url=reject_url,
     )
-    send_email(
+    sent = send_email(
         to=settings.developer_email,
         subject=f"RevvUp — Approve showroom owner: {body.showroom_name or body.full_name}",
         html=html,
     )
+    return sent, approve_url
