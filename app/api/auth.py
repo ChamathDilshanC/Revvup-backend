@@ -2,12 +2,11 @@ import uuid
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-
-from app.core.exceptions import bad_request, conflict, forbidden, internal_error, unauthorized
 from fastapi.responses import HTMLResponse
 
 from app.core.config import get_settings
 from app.core.email import build_owner_approval_email, result_page, send_email
+from app.core.exceptions import bad_request, conflict, forbidden, internal_error, unauthorized
 from app.core.security import get_current_profile, require_active_owner
 from app.core.supabase_client import get_supabase, get_supabase_as_user, get_supabase_auth
 from app.models.user import AuthResponse, LoginRequest, Profile, ProfileUpdateRequest, RegisterRequest
@@ -37,9 +36,15 @@ async def register(body: RegisterRequest):
     if is_owner and not body.showroom_name:
         raise bad_request("showroom_name is required for showroom owners", field="showroom_name")
 
-    db = get_supabase()
+    db = await get_supabase()
 
-    existing = db.table(PROFILES).select("email, role, status").eq("email", body.email).limit(1).execute()
+    existing = (
+        await db.table(PROFILES)
+        .select("email, role, status")
+        .eq("email", body.email)
+        .limit(1)
+        .execute()
+    )
     if existing.data:
         row = existing.data[0]
         if row.get("role") == "showroom_owner" and row.get("status") == "pending":
@@ -54,9 +59,8 @@ async def register(body: RegisterRequest):
             code="EMAIL_EXISTS",
         )
 
-    # Create a confirmed auth user via the admin API (service role key).
     try:
-        created = db.auth.admin.create_user(
+        created = await db.auth.admin.create_user(
             {
                 "email": body.email,
                 "password": body.password,
@@ -89,11 +93,10 @@ async def register(body: RegisterRequest):
         "confirmation_token": token,
     }
 
-    inserted = db.table(PROFILES).insert(profile_row).execute()
+    inserted = await db.table(PROFILES).insert(profile_row).execute()
     if not inserted.data:
-        # Roll back the auth user so the email can be reused.
         try:
-            db.auth.admin.delete_user(user.id)
+            await db.auth.admin.delete_user(user.id)
         except Exception:  # noqa: BLE001
             pass
         raise internal_error("Failed to create profile")
@@ -112,8 +115,7 @@ async def register(body: RegisterRequest):
             ),
         )
 
-    # Clients get a session immediately.
-    session = _sign_in(body.email, body.password)
+    session = await _sign_in(body.email, body.password)
     return AuthResponse(
         access_token=session["access_token"],
         refresh_token=session["refresh_token"],
@@ -125,11 +127,16 @@ async def register(body: RegisterRequest):
 @router.post("/login", response_model=AuthResponse)
 async def login(body: LoginRequest):
     """Authenticate via Supabase Auth and return the profile + role."""
-    session = _sign_in(body.email, body.password)
+    session = await _sign_in(body.email, body.password)
 
-    # Load profile as the signed-in user (anon key + JWT). Does not require service_role.
-    user_db = get_supabase_as_user(session["access_token"])
-    res = user_db.table(PROFILES).select("*").eq("id", session["user_id"]).limit(1).execute()
+    user_db = await get_supabase_as_user(session["access_token"])
+    res = (
+        await user_db.table(PROFILES)
+        .select("*")
+        .eq("id", session["user_id"])
+        .limit(1)
+        .execute()
+    )
     if not res.data:
         raise forbidden("Profile not found", code="PROFILE_NOT_FOUND")
     profile = _profile_from_row(res.data[0])
@@ -164,8 +171,8 @@ async def update_me(body: ProfileUpdateRequest, owner: dict = Depends(require_ac
     if body.longitude is not None and not (-180 <= body.longitude <= 180):
         raise bad_request("longitude must be between -180 and 180", field="longitude")
 
-    db = get_supabase()
-    res = db.table(PROFILES).update(payload).eq("id", owner["id"]).execute()
+    db = await get_supabase()
+    res = await db.table(PROFILES).update(payload).eq("id", owner["id"]).execute()
     if not res.data:
         raise internal_error("Failed to update profile")
     return _profile_from_row(res.data[0])
@@ -177,8 +184,14 @@ async def confirm_owner(
     action: str = Query("approve", pattern="^(approve|reject)$"),
 ):
     """Developer-facing endpoint hit from the approval email's buttons."""
-    db = get_supabase()
-    res = db.table(PROFILES).select("*").eq("confirmation_token", token).limit(1).execute()
+    db = await get_supabase()
+    res = (
+        await db.table(PROFILES)
+        .select("*")
+        .eq("confirmation_token", token)
+        .limit(1)
+        .execute()
+    )
     if not res.data:
         return HTMLResponse(
             result_page(
@@ -192,7 +205,7 @@ async def confirm_owner(
     profile = res.data[0]
     new_status = "active" if action == "approve" else "rejected"
 
-    db.table(PROFILES).update(
+    await db.table(PROFILES).update(
         {"status": new_status, "confirmation_token": None}
     ).eq("id", profile["id"]).execute()
 
@@ -213,14 +226,10 @@ async def confirm_owner(
     )
 
 
-# --- helpers --------------------------------------------------------------
-
-
-def _sign_in(email: str, password: str) -> dict:
-    # Must use anon key — service_role cannot sign in as end users.
-    db = get_supabase_auth()
+async def _sign_in(email: str, password: str) -> dict:
+    db = await get_supabase_auth()
     try:
-        result = db.auth.sign_in_with_password({"email": email, "password": password})
+        result = await db.auth.sign_in_with_password({"email": email, "password": password})
     except Exception as exc:  # noqa: BLE001
         raise unauthorized("Invalid email or password. Check your details or register first.") from exc
     if result.session is None or result.user is None:

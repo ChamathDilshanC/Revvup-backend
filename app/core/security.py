@@ -9,10 +9,10 @@ async def get_current_profile(authorization: str | None = Header(default=None)) 
     Expects an ``Authorization: Bearer <access_token>`` header.
     """
     token = parse_bearer_token(authorization)
-    auth_db = get_supabase_auth()
+    auth_db = await get_supabase_auth()
 
     try:
-        user_res = auth_db.auth.get_user(token)
+        user_res = await auth_db.auth.get_user(token)
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
@@ -20,8 +20,8 @@ async def get_current_profile(authorization: str | None = Header(default=None)) 
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    db = get_supabase()
-    res = db.table("profiles").select("*").eq("id", user.id).limit(1).execute()
+    db = await get_supabase()
+    res = await db.table("profiles").select("*").eq("id", user.id).limit(1).execute()
     if not res.data:
         raise HTTPException(status_code=403, detail="Profile not found")
     return res.data[0]

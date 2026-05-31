@@ -2,7 +2,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from supabase import Client
+from supabase import AsyncClient
 
 from app.core.config import get_settings
 from app.core.exceptions import not_found
@@ -49,7 +49,31 @@ def _ensure_bike_uuid(bike_id: str) -> None:
         raise not_found("Bike not found")
 
 
-def _attach_showroom_info(rows: list[dict]) -> list[dict]:
+async def _fetch_owner_profiles(db: AsyncClient, owner_ids: list) -> list[dict]:
+    """Load owner profiles; fall back if map columns are not migrated yet."""
+    try:
+        res = (
+            await db.table(PROFILES)
+            .select(_PROFILE_SELECT_WITH_MAP)
+            .in_("id", owner_ids)
+            .execute()
+        )
+        return res.data or []
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Profile map columns unavailable — run supabase_migrations/add_showroom_location.sql",
+            exc_info=True,
+        )
+        res = (
+            await db.table(PROFILES)
+            .select(_PROFILE_SELECT_BASE)
+            .in_("id", owner_ids)
+            .execute()
+        )
+        return res.data or []
+
+
+async def _attach_showroom_info(rows: list[dict]) -> list[dict]:
     """Join owner profile showroom fields onto bike rows."""
     if not rows:
         return []
@@ -57,8 +81,8 @@ def _attach_showroom_info(rows: list[dict]) -> list[dict]:
     if not owner_ids:
         return rows
 
-    db = get_supabase()
-    profiles = _fetch_owner_profiles(db, owner_ids)
+    db = await get_supabase()
+    profiles = await _fetch_owner_profiles(db, owner_ids)
     by_id = {p["id"]: p for p in profiles}
 
     enriched: list[dict] = []
@@ -71,30 +95,6 @@ def _attach_showroom_info(rows: list[dict]) -> list[dict]:
         item["showroom_longitude"] = prof.get("longitude")
         enriched.append(item)
     return enriched
-
-
-def _fetch_owner_profiles(db, owner_ids: list) -> list[dict]:
-    """Load owner profiles; fall back if map columns are not migrated yet."""
-    try:
-        res = (
-            db.table(PROFILES)
-            .select(_PROFILE_SELECT_WITH_MAP)
-            .in_("id", owner_ids)
-            .execute()
-        )
-        return res.data or []
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "Profile map columns unavailable — run supabase_migrations/add_showroom_location.sql",
-            exc_info=True,
-        )
-        res = (
-            db.table(PROFILES)
-            .select(_PROFILE_SELECT_BASE)
-            .in_("id", owner_ids)
-            .execute()
-        )
-        return res.data or []
 
 
 def _normalize_bike_row(row: dict) -> dict:
@@ -122,21 +122,21 @@ def _to_detail(row: dict) -> BikeDetail:
 @router.get("", response_model=list[BikeSummary])
 async def list_bikes():
     """Public catalog — all bikes with showroom info for client Explore."""
-    db = get_supabase()
-    res = db.table(TABLE).select("*").order("created_at", desc=True).execute()
-    rows = _attach_showroom_info(res.data or [])
+    db = await get_supabase()
+    res = await db.table(TABLE).select("*").order("created_at", desc=True).execute()
+    rows = await _attach_showroom_info(res.data or [])
     return [_to_summary(row) for row in rows]
 
 
 @router.get("/mine", response_model=list[BikeSummary])
 async def list_my_bikes(owner: dict = Depends(require_active_owner)):
     """Bikes the logged-in showroom owner (or all bikes for admin) can manage."""
-    db = get_supabase()
+    db = await get_supabase()
     query = db.table(TABLE).select("*").order("created_at", desc=True)
     if owner.get("role") != "admin":
         query = query.eq("owner_id", owner["id"])
-    res = query.execute()
-    rows = _attach_showroom_info(res.data or [])
+    res = await query.execute()
+    rows = await _attach_showroom_info(res.data or [])
     return [_to_summary(row) for row in rows]
 
 
@@ -144,11 +144,11 @@ async def list_my_bikes(owner: dict = Depends(require_active_owner)):
 async def get_bike(bike_id: str):
     """Full bike specs plus showroom info."""
     _ensure_bike_uuid(bike_id)
-    db = get_supabase()
-    res = db.table(TABLE).select("*").eq("id", bike_id).limit(1).execute()
+    db = await get_supabase()
+    res = await db.table(TABLE).select("*").eq("id", bike_id).limit(1).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Bike not found")
-    row = _attach_showroom_info(res.data)[0]
+    row = (await _attach_showroom_info(res.data))[0]
     return _to_detail(row)
 
 
@@ -156,13 +156,13 @@ async def get_bike(bike_id: str):
 async def create_bike(
     body: BikeCreate,
     owner: dict = Depends(require_active_owner),
-    db: Client = Depends(get_supabase_for_writes),
+    db: AsyncClient = Depends(get_supabase_for_writes),
 ):
     """Insert a new bike (active showroom owner / admin)."""
     payload = body.model_dump(exclude_none=True)
     payload["owner_id"] = owner["id"]
     try:
-        res = db.table(TABLE).insert(payload).execute()
+        res = await db.table(TABLE).insert(payload).execute()
     except Exception as exc:  # noqa: BLE001
         logger.exception("Supabase insert bike failed")
         msg = str(exc)
@@ -178,7 +178,7 @@ async def create_bike(
     if not res.data:
         raise HTTPException(status_code=500, detail="Failed to create bike")
     try:
-        row = _attach_showroom_info(res.data)[0]
+        row = (await _attach_showroom_info(res.data))[0]
         return _to_detail(row)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Bike create response build failed")
@@ -190,18 +190,18 @@ async def update_bike(
     bike_id: str,
     body: BikeUpdate,
     owner: dict = Depends(require_active_owner),
-    db: Client = Depends(get_supabase_for_writes),
+    db: AsyncClient = Depends(get_supabase_for_writes),
 ):
     """Partially update a bike (owner of the bike, or admin)."""
     _ensure_bike_uuid(bike_id)
     payload = body.model_dump(exclude_none=True)
     if not payload:
         raise HTTPException(status_code=400, detail="No fields to update")
-    _assert_can_manage(db, bike_id, owner)
-    res = db.table(TABLE).update(payload).eq("id", bike_id).execute()
+    await _assert_can_manage(db, bike_id, owner)
+    res = await db.table(TABLE).update(payload).eq("id", bike_id).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Bike not found")
-    row = _attach_showroom_info(res.data)[0]
+    row = (await _attach_showroom_info(res.data))[0]
     return _to_detail(row)
 
 
@@ -209,18 +209,18 @@ async def update_bike(
 async def delete_bike(
     bike_id: str,
     owner: dict = Depends(require_active_owner),
-    db: Client = Depends(get_supabase_for_writes),
+    db: AsyncClient = Depends(get_supabase_for_writes),
 ):
     """Delete a bike (owner of the bike, or admin)."""
     _ensure_bike_uuid(bike_id)
-    _assert_can_manage(db, bike_id, owner)
-    db.table(TABLE).delete().eq("id", bike_id).execute()
+    await _assert_can_manage(db, bike_id, owner)
+    await db.table(TABLE).delete().eq("id", bike_id).execute()
     return None
 
 
-def _assert_can_manage(db, bike_id: str, owner: dict) -> dict:
+async def _assert_can_manage(db: AsyncClient, bike_id: str, owner: dict) -> dict:
     """Ensure the caller owns the bike (admins bypass this check)."""
-    res = db.table(TABLE).select("owner_id").eq("id", bike_id).limit(1).execute()
+    res = await db.table(TABLE).select("owner_id").eq("id", bike_id).limit(1).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Bike not found")
     row = res.data[0]
@@ -234,7 +234,7 @@ async def upload_bike_image(
     bike_id: str,
     file: UploadFile = File(...),
     owner: dict = Depends(require_active_owner),
-    db: Client = Depends(get_supabase_for_writes),
+    db: AsyncClient = Depends(get_supabase_for_writes),
 ):
     """Upload an image to Supabase Storage and attach its public URL to the bike."""
     _ensure_bike_uuid(bike_id)
@@ -247,7 +247,7 @@ async def upload_bike_image(
 
     settings = get_settings()
 
-    _assert_can_manage(db, bike_id, owner)
+    await _assert_can_manage(db, bike_id, owner)
 
     content = await file.read()
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
@@ -259,7 +259,7 @@ async def upload_bike_image(
 
     storage = db.storage.from_(settings.supabase_bucket)
     try:
-        storage.upload(
+        await storage.upload(
             path=object_path,
             file=content,
             file_options={"content-type": content_type, "upsert": "true"},
@@ -270,8 +270,8 @@ async def upload_bike_image(
 
     public_url = _public_storage_url(settings, object_path)
 
-    res = db.table(TABLE).update({"image_url": public_url}).eq("id", bike_id).execute()
+    res = await db.table(TABLE).update({"image_url": public_url}).eq("id", bike_id).execute()
     if not res.data:
         raise HTTPException(status_code=500, detail="Failed to attach image to bike")
-    row = _attach_showroom_info(res.data)[0]
+    row = (await _attach_showroom_info(res.data))[0]
     return _to_detail(row)
