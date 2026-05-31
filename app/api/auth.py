@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 from app.core.config import get_settings
 from app.core.email import build_owner_approval_email, result_page, send_email
 from app.core.security import get_current_profile, require_active_owner
-from app.core.supabase_client import get_supabase
+from app.core.supabase_client import get_supabase, get_supabase_auth
 from app.models.user import AuthResponse, LoginRequest, Profile, ProfileUpdateRequest, RegisterRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -216,11 +216,12 @@ def confirm_owner(
 
 
 def _sign_in(email: str, password: str) -> dict:
-    db = get_supabase()
+    # Must use anon key — service_role cannot sign in as end users.
+    db = get_supabase_auth()
     try:
         result = db.auth.sign_in_with_password({"email": email, "password": password})
-    except Exception:  # noqa: BLE001
-        raise unauthorized()
+    except Exception as exc:  # noqa: BLE001
+        raise unauthorized("Invalid email or password. Check your details or register first.") from exc
     if result.session is None or result.user is None:
         raise unauthorized()
     return {

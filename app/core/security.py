@@ -1,6 +1,6 @@
 from fastapi import Depends, Header, HTTPException
 
-from app.core.supabase_client import get_supabase, parse_bearer_token
+from app.core.supabase_client import get_supabase, get_supabase_auth, parse_bearer_token
 
 
 def get_current_profile(authorization: str | None = Header(default=None)) -> dict:
@@ -9,10 +9,10 @@ def get_current_profile(authorization: str | None = Header(default=None)) -> dic
     Expects an ``Authorization: Bearer <access_token>`` header.
     """
     token = parse_bearer_token(authorization)
-    db = get_supabase()
+    auth_db = get_supabase_auth()
 
     try:
-        user_res = db.auth.get_user(token)
+        user_res = auth_db.auth.get_user(token)
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
@@ -20,6 +20,7 @@ def get_current_profile(authorization: str | None = Header(default=None)) -> dic
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+    db = get_supabase()
     res = db.table("profiles").select("*").eq("id", user.id).limit(1).execute()
     if not res.data:
         raise HTTPException(status_code=403, detail="Profile not found")

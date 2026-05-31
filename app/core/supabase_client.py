@@ -38,17 +38,29 @@ def parse_bearer_token(authorization: str | None) -> str:
 
 
 @lru_cache
+def get_supabase_auth() -> Client:
+    """Anon key client — use for ``sign_in_with_password`` and ``auth.get_user``."""
+    settings = get_settings()
+    if not settings.supabase_url or not settings.supabase_anon_key:
+        raise service_unavailable("SUPABASE_URL and SUPABASE_ANON_KEY are required.")
+    return create_client(settings.supabase_url, settings.supabase_anon_key)
+
+
+@lru_cache
 def get_supabase() -> Client:
-    """Cached client for reads — prefers service role, else anon."""
+    """Service-role client — admin auth, catalog reads, profile joins (bypasses RLS)."""
     settings = get_settings()
     if not settings.is_configured:
         raise service_unavailable(
             "Supabase is not configured. Set SUPABASE_URL and "
-            "SUPABASE_SERVICE_KEY (or SUPABASE_ANON_KEY) environment variables."
+            "SUPABASE_SERVICE_KEY (service_role JWT)."
         )
     service = _service_role_key(settings)
-    key = service if service and _jwt_role(service) == "service_role" else settings.supabase_anon_key
-    return create_client(settings.supabase_url, key)
+    if not service or _jwt_role(service) != "service_role":
+        raise service_unavailable(
+            "SUPABASE_SERVICE_KEY must be the service_role JWT from Supabase (Legacy API keys)."
+        )
+    return create_client(settings.supabase_url, service)
 
 
 def get_supabase_as_user(access_token: str) -> Client:
@@ -68,7 +80,7 @@ def get_supabase_as_user(access_token: str) -> Client:
 
 
 def get_supabase_for_writes(authorization: str | None = Header(default=None)) -> Client:
-    """DB client for inserts/updates — real service_role, else user JWT + RLS policies."""
+    """DB client for inserts/updates — service_role if configured, else user JWT + RLS."""
     settings = get_settings()
     service = _service_role_key(settings)
     if service and _jwt_role(service) == "service_role":
