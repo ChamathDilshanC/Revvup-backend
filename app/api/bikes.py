@@ -120,7 +120,7 @@ def _to_detail(row: dict) -> BikeDetail:
 
 
 @router.get("", response_model=list[BikeSummary])
-def list_bikes():
+async def list_bikes():
     """Public catalog — all bikes with showroom info for client Explore."""
     db = get_supabase()
     res = db.table(TABLE).select("*").order("created_at", desc=True).execute()
@@ -129,7 +129,7 @@ def list_bikes():
 
 
 @router.get("/mine", response_model=list[BikeSummary])
-def list_my_bikes(owner: dict = Depends(require_active_owner)):
+async def list_my_bikes(owner: dict = Depends(require_active_owner)):
     """Bikes the logged-in showroom owner (or all bikes for admin) can manage."""
     db = get_supabase()
     query = db.table(TABLE).select("*").order("created_at", desc=True)
@@ -141,7 +141,7 @@ def list_my_bikes(owner: dict = Depends(require_active_owner)):
 
 
 @router.get("/{bike_id}", response_model=BikeDetail)
-def get_bike(bike_id: str):
+async def get_bike(bike_id: str):
     """Full bike specs plus showroom info."""
     _ensure_bike_uuid(bike_id)
     db = get_supabase()
@@ -153,7 +153,7 @@ def get_bike(bike_id: str):
 
 
 @router.post("", response_model=BikeDetail, status_code=201)
-def create_bike(
+async def create_bike(
     body: BikeCreate,
     owner: dict = Depends(require_active_owner),
     db: Client = Depends(get_supabase_for_writes),
@@ -186,7 +186,7 @@ def create_bike(
 
 
 @router.patch("/{bike_id}", response_model=BikeDetail)
-def update_bike(
+async def update_bike(
     bike_id: str,
     body: BikeUpdate,
     owner: dict = Depends(require_active_owner),
@@ -206,7 +206,7 @@ def update_bike(
 
 
 @router.delete("/{bike_id}", status_code=204)
-def delete_bike(
+async def delete_bike(
     bike_id: str,
     owner: dict = Depends(require_active_owner),
     db: Client = Depends(get_supabase_for_writes),

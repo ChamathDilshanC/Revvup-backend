@@ -10,7 +10,7 @@ PROFILES = "profiles"
 
 
 @router.get("/owners/pending", response_model=list[Profile])
-def list_pending_owners(_: dict = Depends(require_admin)):
+async def list_pending_owners(_: dict = Depends(require_admin)):
     """List showroom owners awaiting approval (admin only)."""
     db = get_supabase()
     res = (
@@ -25,7 +25,7 @@ def list_pending_owners(_: dict = Depends(require_admin)):
 
 
 @router.get("/owners", response_model=list[Profile])
-def list_owners(_: dict = Depends(require_admin)):
+async def list_owners(_: dict = Depends(require_admin)):
     """List all showroom owners regardless of status (admin only)."""
     db = get_supabase()
     res = (
@@ -39,13 +39,13 @@ def list_owners(_: dict = Depends(require_admin)):
 
 
 @router.post("/owners/{user_id}/approve", response_model=Profile)
-def approve_owner(user_id: str, _: dict = Depends(require_admin)):
+async def approve_owner(user_id: str, _: dict = Depends(require_admin)):
     """Approve a pending showroom owner from the admin UI (admin only)."""
     return _set_status(user_id, "active")
 
 
 @router.post("/owners/{user_id}/reject", response_model=Profile)
-def reject_owner(user_id: str, _: dict = Depends(require_admin)):
+async def reject_owner(user_id: str, _: dict = Depends(require_admin)):
     """Reject a showroom owner request from the admin UI (admin only)."""
     return _set_status(user_id, "rejected")
 

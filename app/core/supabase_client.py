@@ -3,9 +3,11 @@ import json
 import os
 from functools import lru_cache
 
+import httpx
 from fastapi import Header, HTTPException
+from httpx import Limits, Timeout
 from supabase import Client, create_client
-from supabase.lib.client_options import ClientOptions
+from supabase.lib.client_options import SyncClientOptions as ClientOptions
 
 from app.core.config import get_settings
 from app.core.exceptions import service_unavailable
@@ -38,12 +40,36 @@ def parse_bearer_token(authorization: str | None) -> str:
 
 
 @lru_cache
+def _serverless_httpx() -> httpx.Client:
+    """HTTP client tuned for Vercel/Lambda — avoid stale pooled sockets."""
+    return httpx.Client(
+        limits=Limits(max_connections=10, max_keepalive_connections=0),
+        timeout=Timeout(30.0, connect=10.0),
+    )
+
+
+def _client_options(**header_overrides: str) -> ClientOptions:
+    options = ClientOptions(
+        auto_refresh_token=False,
+        persist_session=False,
+        httpx_client=_serverless_httpx(),
+    )
+    if header_overrides:
+        options.headers.update(header_overrides)
+    return options
+
+
+@lru_cache
 def get_supabase_auth() -> Client:
     """Anon key client — use for ``sign_in_with_password`` and ``auth.get_user``."""
     settings = get_settings()
     if not settings.supabase_url or not settings.supabase_anon_key:
         raise service_unavailable("SUPABASE_URL and SUPABASE_ANON_KEY are required.")
-    return create_client(settings.supabase_url, settings.supabase_anon_key)
+    return create_client(
+        settings.supabase_url,
+        settings.supabase_anon_key,
+        options=_client_options(),
+    )
 
 
 @lru_cache
@@ -66,7 +92,7 @@ def get_supabase() -> Client:
             "SUPABASE_SERVICE_KEY must be the Legacy service_role JWT (starts with eyJ…), "
             "not the anon key and not the new sb_secret_ key. Copy service_role secret from Supabase."
         )
-    return create_client(settings.supabase_url, service)
+    return create_client(settings.supabase_url, service, options=_client_options())
 
 
 def get_supabase_as_user(access_token: str) -> Client:
@@ -77,19 +103,19 @@ def get_supabase_as_user(access_token: str) -> Client:
     return create_client(
         settings.supabase_url,
         settings.supabase_anon_key,
-        options=ClientOptions(
-            headers={"Authorization": f"Bearer {access_token}"},
-            auto_refresh_token=False,
-            persist_session=False,
+        options=_client_options(
+            Authorization=f"Bearer {access_token}",
         ),
     )
 
 
-def get_supabase_for_writes(authorization: str | None = Header(default=None)) -> Client:
+async def get_supabase_for_writes(
+    authorization: str | None = Header(default=None),
+) -> Client:
     """DB client for inserts/updates — service_role if configured, else user JWT + RLS."""
     settings = get_settings()
     service = _service_role_key(settings)
     if service and _jwt_role(service) == "service_role":
-        return create_client(settings.supabase_url, service)
+        return create_client(settings.supabase_url, service, options=_client_options())
     token = parse_bearer_token(authorization)
     return get_supabase_as_user(token)

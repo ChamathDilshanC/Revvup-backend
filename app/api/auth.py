@@ -22,7 +22,7 @@ def _profile_from_row(row: dict) -> Profile:
 
 
 @router.post("/register", response_model=AuthResponse, status_code=201)
-def register(body: RegisterRequest):
+async def register(body: RegisterRequest):
     """Register a client or a bike showroom owner.
 
     - **client**: account is active immediately and can log in.
@@ -123,7 +123,7 @@ def register(body: RegisterRequest):
 
 
 @router.post("/login", response_model=AuthResponse)
-def login(body: LoginRequest):
+async def login(body: LoginRequest):
     """Authenticate via Supabase Auth and return the profile + role."""
     session = _sign_in(body.email, body.password)
 
@@ -147,13 +147,13 @@ def login(body: LoginRequest):
 
 
 @router.get("/me", response_model=Profile)
-def me(profile: dict = Depends(get_current_profile)):
+async def me(profile: dict = Depends(get_current_profile)):
     """Return the current authenticated user's profile."""
     return _profile_from_row(profile)
 
 
 @router.patch("/me", response_model=Profile)
-def update_me(body: ProfileUpdateRequest, owner: dict = Depends(require_active_owner)):
+async def update_me(body: ProfileUpdateRequest, owner: dict = Depends(require_active_owner)):
     """Update showroom profile and map pin (active showroom owners / admins)."""
     payload = body.model_dump(exclude_none=True)
     if not payload:
@@ -172,7 +172,7 @@ def update_me(body: ProfileUpdateRequest, owner: dict = Depends(require_active_o
 
 
 @router.get("/confirm", response_class=HTMLResponse)
-def confirm_owner(
+async def confirm_owner(
     token: str = Query(...),
     action: str = Query("approve", pattern="^(approve|reject)$"),
 ):

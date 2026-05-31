@@ -3,7 +3,7 @@ from fastapi import Depends, Header, HTTPException
 from app.core.supabase_client import get_supabase, get_supabase_auth, parse_bearer_token
 
 
-def get_current_profile(authorization: str | None = Header(default=None)) -> dict:
+async def get_current_profile(authorization: str | None = Header(default=None)) -> dict:
     """Resolve the caller's profile from a Supabase access token.
 
     Expects an ``Authorization: Bearer <access_token>`` header.
@@ -27,7 +27,7 @@ def get_current_profile(authorization: str | None = Header(default=None)) -> dic
     return res.data[0]
 
 
-def require_active_owner(profile: dict = Depends(get_current_profile)) -> dict:
+async def require_active_owner(profile: dict = Depends(get_current_profile)) -> dict:
     """Allow only approved showroom owners (or admins) through."""
     if profile.get("role") not in ("showroom_owner", "admin"):
         raise HTTPException(status_code=403, detail="Showroom owner access required")
@@ -36,7 +36,7 @@ def require_active_owner(profile: dict = Depends(get_current_profile)) -> dict:
     return profile
 
 
-def require_admin(profile: dict = Depends(get_current_profile)) -> dict:
+async def require_admin(profile: dict = Depends(get_current_profile)) -> dict:
     """Allow only admins through."""
     if profile.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
