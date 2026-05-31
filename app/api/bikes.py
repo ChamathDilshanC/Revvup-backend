@@ -2,12 +2,12 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from supabase import Client
 
 from app.core.config import get_settings
-from app.core.supabase_client import _service_role_key
 from app.core.exceptions import not_found
 from app.core.security import require_active_owner
-from app.core.supabase_client import get_supabase
+from app.core.supabase_client import get_supabase, get_supabase_for_writes
 from app.models.bike import BikeCreate, BikeDetail, BikeSummary, BikeUpdate
 
 router = APIRouter(prefix="/bikes", tags=["bikes"])
@@ -21,6 +21,13 @@ _PROFILE_SELECT_WITH_MAP = (
     "id, showroom_name, showroom_address, phone, full_name, latitude, longitude"
 )
 _PROFILE_SELECT_BASE = "id, showroom_name, showroom_address, phone, full_name"
+
+
+def _public_storage_url(settings, object_path: str) -> str:
+    """Stable public URL for a file in the bike-images bucket."""
+    base = settings.supabase_url.rstrip("/")
+    bucket = settings.supabase_bucket
+    return f"{base}/storage/v1/object/public/{bucket}/{object_path}"
 
 
 def _resolve_image_content_type(file: UploadFile) -> str:
@@ -146,25 +153,27 @@ def get_bike(bike_id: str):
 
 
 @router.post("", response_model=BikeDetail, status_code=201)
-def create_bike(body: BikeCreate, owner: dict = Depends(require_active_owner)):
+def create_bike(
+    body: BikeCreate,
+    owner: dict = Depends(require_active_owner),
+    db: Client = Depends(get_supabase_for_writes),
+):
     """Insert a new bike (active showroom owner / admin)."""
-    settings = get_settings()
-    if not _service_role_key(settings):
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Server cannot write to the database. Set SUPABASE_SERVICE_KEY "
-                "(service role) on the backend — the anon key cannot create bikes."
-            ),
-        )
-
-    db = get_supabase()
     payload = body.model_dump(exclude_none=True)
     payload["owner_id"] = owner["id"]
     try:
         res = db.table(TABLE).insert(payload).execute()
     except Exception as exc:  # noqa: BLE001
         logger.exception("Supabase insert bike failed")
+        msg = str(exc)
+        if "row-level security" in msg.lower() or "42501" in msg:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Database blocked this listing (RLS). In Supabase SQL Editor, run "
+                    "supabase_migrations/add_bikes_owner_rls.sql, then redeploy the backend."
+                ),
+            ) from exc
         raise HTTPException(status_code=500, detail=f"Failed to create bike: {exc}") from exc
     if not res.data:
         raise HTTPException(status_code=500, detail="Failed to create bike")
@@ -177,10 +186,14 @@ def create_bike(body: BikeCreate, owner: dict = Depends(require_active_owner)):
 
 
 @router.patch("/{bike_id}", response_model=BikeDetail)
-def update_bike(bike_id: str, body: BikeUpdate, owner: dict = Depends(require_active_owner)):
+def update_bike(
+    bike_id: str,
+    body: BikeUpdate,
+    owner: dict = Depends(require_active_owner),
+    db: Client = Depends(get_supabase_for_writes),
+):
     """Partially update a bike (owner of the bike, or admin)."""
     _ensure_bike_uuid(bike_id)
-    db = get_supabase()
     payload = body.model_dump(exclude_none=True)
     if not payload:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -193,10 +206,13 @@ def update_bike(bike_id: str, body: BikeUpdate, owner: dict = Depends(require_ac
 
 
 @router.delete("/{bike_id}", status_code=204)
-def delete_bike(bike_id: str, owner: dict = Depends(require_active_owner)):
+def delete_bike(
+    bike_id: str,
+    owner: dict = Depends(require_active_owner),
+    db: Client = Depends(get_supabase_for_writes),
+):
     """Delete a bike (owner of the bike, or admin)."""
     _ensure_bike_uuid(bike_id)
-    db = get_supabase()
     _assert_can_manage(db, bike_id, owner)
     db.table(TABLE).delete().eq("id", bike_id).execute()
     return None
@@ -218,16 +234,17 @@ async def upload_bike_image(
     bike_id: str,
     file: UploadFile = File(...),
     owner: dict = Depends(require_active_owner),
+    db: Client = Depends(get_supabase_for_writes),
 ):
     """Upload an image to Supabase Storage and attach its public URL to the bike."""
     _ensure_bike_uuid(bike_id)
-    if file.content_type not in ALLOWED_IMAGE_TYPES:
+    content_type = _resolve_image_content_type(file)
+    if content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}",
         )
 
-    db = get_supabase()
     settings = get_settings()
 
     _assert_can_manage(db, bike_id, owner)
@@ -247,10 +264,11 @@ async def upload_bike_image(
             file=content,
             file_options={"content-type": content_type, "upsert": "true"},
         )
-    except Exception:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail="Image upload failed")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Storage upload failed")
+        raise HTTPException(status_code=500, detail=f"Image upload failed: {exc}") from exc
 
-    public_url = storage.get_public_url(object_path)
+    public_url = _public_storage_url(settings, object_path)
 
     res = db.table(TABLE).update({"image_url": public_url}).eq("id", bike_id).execute()
     if not res.data:

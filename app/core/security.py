@@ -1,6 +1,6 @@
 from fastapi import Depends, Header, HTTPException
 
-from app.core.supabase_client import get_supabase
+from app.core.supabase_client import get_supabase, parse_bearer_token
 
 
 def get_current_profile(authorization: str | None = Header(default=None)) -> dict:
@@ -8,10 +8,7 @@ def get_current_profile(authorization: str | None = Header(default=None)) -> dic
 
     Expects an ``Authorization: Bearer <access_token>`` header.
     """
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-
-    token = authorization.split(" ", 1)[1].strip()
+    token = parse_bearer_token(authorization)
     db = get_supabase()
 
     try:
