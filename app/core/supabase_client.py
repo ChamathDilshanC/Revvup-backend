@@ -56,9 +56,15 @@ def get_supabase() -> Client:
             "SUPABASE_SERVICE_KEY (service_role JWT)."
         )
     service = _service_role_key(settings)
-    if not service or _jwt_role(service) != "service_role":
+    if not service:
         raise service_unavailable(
-            "SUPABASE_SERVICE_KEY must be the service_role JWT from Supabase (Legacy API keys)."
+            "SUPABASE_SERVICE_KEY is missing on the server. Add the service_role JWT from "
+            "Supabase → Project Settings → API → Legacy keys."
+        )
+    if _jwt_role(service) != "service_role":
+        raise service_unavailable(
+            "SUPABASE_SERVICE_KEY must be the Legacy service_role JWT (starts with eyJ…), "
+            "not the anon key and not the new sb_secret_ key. Copy service_role secret from Supabase."
         )
     return create_client(settings.supabase_url, service)
 

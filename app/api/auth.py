@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 from app.core.config import get_settings
 from app.core.email import build_owner_approval_email, result_page, send_email
 from app.core.security import get_current_profile, require_active_owner
-from app.core.supabase_client import get_supabase, get_supabase_auth
+from app.core.supabase_client import get_supabase, get_supabase_as_user, get_supabase_auth
 from app.models.user import AuthResponse, LoginRequest, Profile, ProfileUpdateRequest, RegisterRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -125,10 +125,11 @@ def register(body: RegisterRequest):
 @router.post("/login", response_model=AuthResponse)
 def login(body: LoginRequest):
     """Authenticate via Supabase Auth and return the profile + role."""
-    db = get_supabase()
     session = _sign_in(body.email, body.password)
 
-    res = db.table(PROFILES).select("*").eq("id", session["user_id"]).limit(1).execute()
+    # Load profile as the signed-in user (anon key + JWT). Does not require service_role.
+    user_db = get_supabase_as_user(session["access_token"])
+    res = user_db.table(PROFILES).select("*").eq("id", session["user_id"]).limit(1).execute()
     if not res.data:
         raise forbidden("Profile not found", code="PROFILE_NOT_FOUND")
     profile = _profile_from_row(res.data[0])
